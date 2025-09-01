@@ -124,6 +124,25 @@ class HorticulturalSalesPredictor:
         X_train_seq, y_train_seq = self.create_sequences(X_train, y_train)
         X_val_seq, y_val_seq = self.create_sequences(X_val, y_val)
         
+        # Check for NaN values and handle them
+        if np.isnan(X_train_seq).any() or np.isnan(y_train_seq).any():
+            print("Warning: NaN values found in training data. Removing NaN samples...")
+            # Remove sequences with NaN values
+            valid_indices = ~(np.isnan(X_train_seq).any(axis=(1,2)) | np.isnan(y_train_seq).any(axis=1))
+            X_train_seq = X_train_seq[valid_indices]
+            y_train_seq = y_train_seq[valid_indices]
+            
+        if np.isnan(X_val_seq).any() or np.isnan(y_val_seq).any():
+            print("Warning: NaN values found in validation data. Removing NaN samples...")
+            valid_indices = ~(np.isnan(X_val_seq).any(axis=(1,2)) | np.isnan(y_val_seq).any(axis=1))
+            X_val_seq = X_val_seq[valid_indices]
+            y_val_seq = y_val_seq[valid_indices]
+        
+        if len(X_train_seq) == 0 or len(X_val_seq) == 0:
+            raise ValueError("No valid training or validation sequences after removing NaN values!")
+        
+        print(f"Training sequences: {len(X_train_seq)}, Validation sequences: {len(X_val_seq)}")
+        
         # Convert to tensors
         X_train_tensor = torch.FloatTensor(X_train_seq).to(self.device)
         y_train_tensor = torch.FloatTensor(y_train_seq).to(self.device)
@@ -155,20 +174,38 @@ class HorticulturalSalesPredictor:
         val_losses = []
         best_val_loss = float('inf')
         patience_counter = 0
+        model_saved = False
         
         for epoch in range(epochs):
             # Training
             self.model.train()
             train_loss = 0
+            batch_count = 0
+            
             for batch_X, batch_y in train_loader:
                 optimizer.zero_grad()
                 output = self.model(batch_X)
                 loss = criterion(output, batch_y)
+                
+                # Check for NaN loss
+                if torch.isnan(loss):
+                    print(f"Warning: NaN loss detected at epoch {epoch}, batch {batch_count}")
+                    continue
+                    
                 loss.backward()
+                
+                # Gradient clipping to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                
                 optimizer.step()
                 train_loss += loss.item()
+                batch_count += 1
             
-            train_loss /= len(train_loader)
+            if batch_count == 0:
+                print(f"No valid batches in epoch {epoch}, stopping training")
+                break
+                
+            train_loss /= batch_count
             train_losses.append(train_loss)
             
             # Validation
@@ -176,14 +213,21 @@ class HorticulturalSalesPredictor:
             with torch.no_grad():
                 val_output = self.model(X_val_tensor)
                 val_loss = criterion(val_output, y_val_tensor).item()
+                
+                # Check for NaN validation loss
+                if np.isnan(val_loss):
+                    print(f"Warning: NaN validation loss at epoch {epoch}")
+                    val_loss = float('inf')
+                    
                 val_losses.append(val_loss)
             
             # Early stopping
-            if val_loss < best_val_loss:
+            if val_loss < best_val_loss and not np.isnan(val_loss):
                 best_val_loss = val_loss
                 patience_counter = 0
                 # Save best model
                 torch.save(self.model.state_dict(), 'best_model.pth')
+                model_saved = True
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
@@ -193,8 +237,12 @@ class HorticulturalSalesPredictor:
             if epoch % 10 == 0:
                 print(f'Epoch [{epoch}/{epochs}], Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
         
-        # Load best model
-        self.model.load_state_dict(torch.load('best_model.pth'))
+        # Load best model if it was saved
+        if model_saved:
+            self.model.load_state_dict(torch.load('best_model.pth'))
+            print(f"Loaded best model with validation loss: {best_val_loss:.4f}")
+        else:
+            print("Warning: No valid model was saved due to NaN losses. Using last model state.")
         
         return {
             'train_losses': train_losses,
@@ -465,7 +513,7 @@ def main():
     
     # Configuration
     config = {
-        'file_path': 'OwnDoc.csv',
+        'file_path': 'Data/OwnDoc.csv',
         'target_column': 'SoldTulips',
         'train_percentage': 0.5,
         'k_folds': 3,
