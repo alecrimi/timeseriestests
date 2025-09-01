@@ -556,4 +556,5 @@ def main():
         return None, None, None, None
 
 if __name__ == "__main__":
-    predictor, results, sample_data = main()
+    # Updated to match the 4 return values from main()
+    predictor, results, raw_data, features_data = main()
