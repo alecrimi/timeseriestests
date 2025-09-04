@@ -1,0 +1,18 @@
+# === General ===
+file_path: "Data/OwnDoc.csv"
+target_column: "SoldTulips"
+
+# === Fixed run parameters ===
+sequence_length: 7
+hidden_size: 64
+num_layers: 2
+dropout: 0.3
+learning_rate: 0.001
+batch_size: 16
+epochs: 100
+train_percentage: 0.5
+k_folds: 3
+
+# === Optuna ===
+optuna_search: false   # true → run search
+n_trials: 10
