@@ -93,19 +93,38 @@ class SARIMAPredictor:
         
         return current_series, num_regular_diff, seasonal_diff_applied
     
-    def grid_search_sarima(self, series: pd.Series, max_p: int = 3, max_d: int = 2, max_q: int = 3,
-                          max_P: int = 2, max_D: int = 1, max_Q: int = 2, 
+    def grid_search_sarima(self, series: pd.Series, max_p: int = 2, max_d: int = 1, max_q: int = 2,
+                          max_P: int = 1, max_D: int = 1, max_Q: int = 1, 
                           information_criterion: str = 'aic') -> Dict:
         """
         Perform grid search to find optimal SARIMA parameters
         """
+        n_obs = len(series)
         print(f"Starting SARIMA grid search...")
+        print(f"Sample size: {n_obs}")
+        
+        # Adjust parameters based on sample size
+        if n_obs < 50:
+            max_p, max_q, max_P, max_Q = 1, 1, 0, 0  # Very conservative for small samples
+            print("Small sample detected - using conservative parameters")
+        elif n_obs < 100:
+            max_p, max_q, max_P, max_Q = 2, 2, 1, 1
+            print("Medium sample detected - using moderate parameters")
+        
+        # Check if we have enough data for seasonal modeling
+        min_seasonal_obs = self.seasonal_period * 3  # Need at least 3 full seasons
+        if n_obs < min_seasonal_obs:
+            max_P, max_D, max_Q = 0, 0, 0  # No seasonal components
+            self.seasonal_period = 1  # Disable seasonality
+            print(f"Insufficient data for seasonal modeling ({n_obs} < {min_seasonal_obs}). Using non-seasonal ARIMA.")
+        
         print(f"Parameter ranges: p(0-{max_p}), d(0-{max_d}), q(0-{max_q})")
         print(f"Seasonal ranges: P(0-{max_P}), D(0-{max_D}), Q(0-{max_Q}), S={self.seasonal_period}")
         
         best_score = np.inf
         best_params = None
         results = []
+        successful_fits = 0
         
         # Generate all parameter combinations
         param_combinations = list(product(
@@ -121,21 +140,37 @@ class SARIMAPredictor:
         
         for i, (p, d, q, P, D, Q) in enumerate(param_combinations):
             try:
-                # Skip if too many parameters (overfitting risk)
-                if p + d + q + P + D + Q > 8:
+                order = (p, d, q)
+                seasonal_order = (P, D, Q, self.seasonal_period) if self.seasonal_period > 1 else (0, 0, 0, 0)
+                
+                # Check minimum sample size requirements
+                total_params = p + d + q + P + D + Q
+                min_required_obs = total_params * 3 + self.seasonal_period
+                
+                if n_obs < min_required_obs:
                     continue
                 
-                order = (p, d, q)
-                seasonal_order = (P, D, Q, self.seasonal_period)
+                # Skip if too many parameters (overfitting risk)
+                if total_params > n_obs // 10:  # Conservative rule: max 1 param per 10 observations
+                    continue
+                
+                # Skip problematic combinations
+                if d + D > 2:  # Too much differencing
+                    continue
                 
                 # Fit SARIMA model
                 model = SARIMAX(series, 
                               order=order,
                               seasonal_order=seasonal_order,
                               enforce_stationarity=False,
-                              enforce_invertibility=False)
+                              enforce_invertibility=False,
+                              simple_differencing=True)  # Add this for stability
                 
-                fitted_model = model.fit(disp=False, maxiter=100)
+                fitted_model = model.fit(disp=False, maxiter=50, method='lbfgs')
+                
+                # Check model convergence
+                if not fitted_model.mle_retvals['converged']:
+                    continue
                 
                 # Get information criterion score
                 if information_criterion.lower() == 'aic':
@@ -145,6 +180,10 @@ class SARIMAPredictor:
                 else:
                     score = fitted_model.aic
                 
+                # Check for valid score
+                if np.isnan(score) or np.isinf(score):
+                    continue
+                
                 results.append({
                     'order': order,
                     'seasonal_order': seasonal_order,
@@ -152,6 +191,8 @@ class SARIMAPredictor:
                     'bic': fitted_model.bic,
                     'score': score
                 })
+                
+                successful_fits += 1
                 
                 if score < best_score:
                     best_score = score
@@ -162,28 +203,85 @@ class SARIMAPredictor:
                         'bic': fitted_model.bic
                     }
                 
-                if i % 10 == 0:
-                    print(f"Tested {i+1}/{len(param_combinations)} combinations. Best {information_criterion.upper()}: {best_score:.2f}")
+                if successful_fits % 5 == 0:
+                    print(f"Successful fits: {successful_fits}/{i+1} tested. Best {information_criterion.upper()}: {best_score:.2f}")
                 
             except Exception as e:
                 # Skip failed model fits
                 continue
         
-        if best_params is None:
-            raise ValueError("No valid SARIMA model found. Try adjusting parameter ranges.")
+        print(f"\nGrid search completed: {successful_fits} successful fits out of {len(param_combinations)} tested")
         
-        print(f"\nGrid search completed!")
+        if best_params is None:
+            # Fallback to simple ARIMA models
+            print("No SARIMA models converged. Trying simple ARIMA models...")
+            return self._fallback_simple_arima(series, information_criterion)
+        
         print(f"Best parameters: SARIMA{best_params['order']}x{best_params['seasonal_order']}")
         print(f"Best AIC: {best_params['aic']:.2f}")
         print(f"Best BIC: {best_params['bic']:.2f}")
         
         # Sort results by score for analysis
-        results_df = pd.DataFrame(results).sort_values('score')
+        results_df = pd.DataFrame(results).sort_values('score') if results else pd.DataFrame()
         
         return {
             'best_params': best_params,
             'best_score': best_score,
             'all_results': results_df
+        }
+    
+    def _fallback_simple_arima(self, series: pd.Series, information_criterion: str = 'aic') -> Dict:
+        """
+        Fallback method to try very simple ARIMA models when SARIMA fails
+        """
+        print("Trying fallback simple ARIMA models...")
+        
+        simple_orders = [
+            (0, 1, 0),  # Random walk
+            (1, 0, 0),  # AR(1)
+            (0, 0, 1),  # MA(1)
+            (1, 1, 0),  # ARIMA(1,1,0)
+            (0, 1, 1),  # ARIMA(0,1,1)
+            (1, 1, 1),  # ARIMA(1,1,1)
+        ]
+        
+        best_score = np.inf
+        best_params = None
+        
+        for order in simple_orders:
+            try:
+                model = SARIMAX(series, order=order, seasonal_order=(0, 0, 0, 0))
+                fitted_model = model.fit(disp=False, maxiter=50)
+                
+                score = fitted_model.aic if information_criterion.lower() == 'aic' else fitted_model.bic
+                
+                if score < best_score and not np.isnan(score):
+                    best_score = score
+                    best_params = {
+                        'order': order,
+                        'seasonal_order': (0, 0, 0, 0),
+                        'aic': fitted_model.aic,
+                        'bic': fitted_model.bic
+                    }
+                    print(f"Simple ARIMA{order} - AIC: {fitted_model.aic:.2f}")
+                    
+            except Exception as e:
+                continue
+        
+        if best_params is None:
+            # Ultimate fallback: random walk
+            best_params = {
+                'order': (0, 1, 0),
+                'seasonal_order': (0, 0, 0, 0),
+                'aic': 999999,
+                'bic': 999999
+            }
+            print("Using random walk model as ultimate fallback")
+        
+        return {
+            'best_params': best_params,
+            'best_score': best_score,
+            'all_results': pd.DataFrame()
         }
     
     def fit_model(self, series: pd.Series, order: Optional[Tuple] = None, 
