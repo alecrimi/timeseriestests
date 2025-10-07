@@ -162,7 +162,7 @@ def get_batch(source, i, batch_size):
     
     # Target: only Failed_quantity (shape: [input_window, batch_size, 1])
     target_data = torch.stack([item[1] for item in data])  # [batch_size, input_window, 1]
-    target_data = target_data.transpose(1,0, 2)  # [input_window, batch_size, 1]
+    target_data = target_data.permute(1,0, 2)  # [input_window, batch_size, 1]
     
     return input_data, target_data
 
