@@ -202,7 +202,9 @@ def evaluate(eval_model, data_source):
         for i in range(0, len(data_source) - 1, eval_batch_size):
             data, targets = get_batch(data_source, i, eval_batch_size)
             output = eval_model(data)
-            total_loss += len(data[0]) * criterion(output, targets).cpu().item()
+            loss = criterion(output, targets)
+            # Use .mean() to ensure we get a scalar tensor before using .item()
+            total_loss += loss.mean().item() * len(data[0])
     return total_loss / len(data_source)
 
 def forecast_seq(model, sequences):
