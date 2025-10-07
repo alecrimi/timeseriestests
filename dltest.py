@@ -130,17 +130,17 @@ def create_inout_sequences(input_data, tw):
     return torch.FloatTensor(inout_seq)
 
 def get_data(data, split):
-    series = data
+    series = torch.FloatTensor(data)  # Convert to tensor first
 
     # Use final 30% for testing (as requested)
     split = round((1 - split) * len(series))  # split = 0.3 means 30% test
     train_data = series[:split]
     test_data = series[split:]
 
-    train_data = train_data.cumsum(axis=0)
+    train_data = train_data.cumsum(dim=0)  # Use dim=0 for 2D tensors
     train_data = 2 * train_data  # Data augmentation
 
-    test_data = test_data.cumsum(axis=0)
+    test_data = test_data.cumsum(dim=0)
 
     train_sequence = create_inout_sequences(train_data, input_window)
     train_sequence = train_sequence[:-output_window] if output_window > 0 else train_sequence
