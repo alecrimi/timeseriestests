@@ -121,10 +121,13 @@ def create_inout_sequences(input_data, tw):
     inout_seq = []
     L = len(input_data)
     for i in range(L - tw):
-        # Input: both features (QuantityAccepted and Failed_quantity)
-        train_seq = input_data[i:i + tw]
-        # Target: only Failed_quantity (the second feature)
-        train_label = input_data[i + output_window:i + tw + output_window, 1:2]  # Only Failed_quantity
+        # Input: both features [tw, 2]
+        train_seq = input_data[i:i + tw]  # shape: [tw, 2]
+        
+        # Target: only Failed_quantity for the next time steps [tw, 1]
+        # We take the Failed_quantity (second column) for the next time steps
+        train_label = input_data[i + output_window:i + tw + output_window, 1:2]  # shape: [tw, 1]
+        
         inout_seq.append((train_seq, train_label))
     return torch.FloatTensor(inout_seq)
 
@@ -151,12 +154,17 @@ def get_data(data, split):
 
 def get_batch(source, i, batch_size):
     seq_len = min(batch_size, len(source) - 1 - i)
-    data = source[i:i + seq_len]
-    # Input: both features
-    input = torch.stack(torch.stack([item[0] for item in data]).chunk(input_window, 1))
-    # Target: only Failed_quantity
-    target = torch.stack(torch.stack([item[1] for item in data]).chunk(input_window, 1))
-    return input, target
+    data = source[i:i+seq_len]
+    
+    # Input: both features (shape: [input_window, batch_size, 2])
+    input_data = torch.stack([item[0] for item in data])  # [batch_size, input_window, 2]
+    input_data = input_data.transpose(0, 1)  # [input_window, batch_size, 2]
+    
+    # Target: only Failed_quantity (shape: [input_window, batch_size, 1])
+    target_data = torch.stack([item[1] for item in data])  # [batch_size, input_window, 1]
+    target_data = target_data.transpose(0, 1)  # [input_window, batch_size, 1]
+    
+    return input_data, target_data
 
 def train(train_data):
     model.train()
@@ -231,7 +239,8 @@ def calculate_metrics(y_true, y_pred):
 
 # Prepare data with 70% train, 30% test split (final 30% for testing)
 train_data, val_data = get_data(combined_log_return, 0.3)  # 70% train, 30% test
-model = transformer(feature_size=2).to(device)  # feature_size=2 for both QuantityAccepted and Failed_quantity
+ 
+model = transformer(feature_size=2).to(device)  # 2 input features
 
 criterion = nn.MSELoss()
 lr = 0.00005
