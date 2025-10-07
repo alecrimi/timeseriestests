@@ -17,9 +17,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("your device is: ", device)
 
 # Load your custom dataset with 3 columns
-df = pd.read_csv("data/facebook.csv")  # Replace with your actual file path
-df['order_date'] = pd.to_datetime(df['order_date'])
-df = df.sort_values('order_date')
+ 
 
 print("Dataset columns:", df.columns.tolist())
 print("Dataset shape:", df.shape)
@@ -27,7 +25,7 @@ df.head()
 
 # Prepare the data - use both QuantityAccepted and Failed_quantity as features
 # but predict only Failed_quantity
-quantity_accepted = df["QuantityAccepted"].fillna(method="ffill").values
+quantity_accepted = df["total_accepted"].fillna(method="ffill").values
 failed_quantity = df["Failed_quantity"].fillna(method="ffill").values
 
 # Create combined features (both QuantityAccepted and Failed_quantity)
@@ -124,9 +122,9 @@ def create_inout_sequences(input_data, tw):
         # Input: both features [tw, 2]
         train_seq = input_data[i:i + tw]  # shape: [tw, 2]
         
-        # Target: only Failed_quantity for the next time steps [tw, 1]
-        # We take the Failed_quantity (second column) for the next time steps
-        train_label = input_data[i + output_window:i + tw + output_window, 1:2]  # shape: [tw, 1]
+        # Target: only Failed_quantity but same sequence length [tw, 1]
+        # We need to predict Failed_quantity for the same time steps as input
+        train_label = input_data[i:i + tw, 1:2]  # shape: [tw, 1] - take only Failed_quantity column
         
         inout_seq.append((train_seq, train_label))
     return torch.FloatTensor(inout_seq)
