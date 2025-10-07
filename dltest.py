@@ -75,11 +75,12 @@ class PositionalEncoding(nn.Module):
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
+        pe = pe.unsqueeze(1)  # Change from unsqueeze(0).transpose(0,1) to unsqueeze(1)
         self.register_buffer('pe', pe)
 
     def forward(self, x):
-        return x + self.pe[:x.size(0), :]
+        # x shape: [seq_len, batch_size, features]
+        return x + self.pe[:x.size(0), :]  # pe shape: [max_len, 1, features]
 
 class transformer(nn.Module):
     def __init__(self, feature_size=250, num_layers=1, dropout=0.1):
@@ -100,11 +101,12 @@ class transformer(nn.Module):
         self.decoder.weight.data.uniform_(-initrange, initrange)
 
     def forward(self, src):
-        if self.src_mask is None or self.src_mask.size(0) != len(src):
+        # src shape should be [seq_len, batch_size, features]
+        if self.src_mask is None or self.src_mask.size(0) != src.size(0):
             device = src.device
-            mask = self._generate_square_subsequent_mask(len(src)).to(device)
+            mask = self._generate_square_subsequent_mask(src.size(0)).to(device)
             self.src_mask = mask
-
+    
         src = self.pos_encoder(src)
         output = self.transformer_encoder(src, self.src_mask)
         output = self.decoder(output)
@@ -156,11 +158,11 @@ def get_batch(source, i, batch_size):
     
     # Input: both features (shape: [input_window, batch_size, 2])
     input_data = torch.stack([item[0] for item in data])  # [batch_size, input_window, 2]
-    input_data = input_data.transpose(0, 1)  # [input_window, batch_size, 2]
+    input_data = input_data.permute(1,0, 2)  # [input_window, batch_size, 2]
     
     # Target: only Failed_quantity (shape: [input_window, batch_size, 1])
     target_data = torch.stack([item[1] for item in data])  # [batch_size, input_window, 1]
-    target_data = target_data.transpose(0, 1)  # [input_window, batch_size, 1]
+    target_data = target_data.transpose(1,0, 2)  # [input_window, batch_size, 1]
     
     return input_data, target_data
 
@@ -238,7 +240,7 @@ def calculate_metrics(y_true, y_pred):
 # Prepare data with 70% train, 30% test split (final 30% for testing)
 train_data, val_data = get_data(combined_log_return, 0.3)  # 70% train, 30% test
  
-model = transformer(feature_size=2).to(device)  # 2 input features
+model = transformer(feature_size=2, num_layers=1, dropout=0.1).to(device)
 
 criterion = nn.MSELoss()
 lr = 0.00005
