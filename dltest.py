@@ -180,7 +180,9 @@ def train(train_data):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 0.7)
         optimizer.step()
 
-        total_loss += loss.item()
+        # Ensure loss is scalar before calling .item()
+        total_loss += loss.detach().mean().item()
+        
         log_interval = max(1, int(len(train_data) / batch_size / 5))
         if batch % log_interval == 0 and batch > 0:
             cur_loss = total_loss / log_interval
@@ -198,15 +200,16 @@ def evaluate(eval_model, data_source):
     eval_model.eval()
     total_loss = 0.0
     eval_batch_size = 1000
+    num_batches = 0
     with torch.no_grad():
         for i in range(0, len(data_source) - 1, eval_batch_size):
             data, targets = get_batch(data_source, i, eval_batch_size)
             output = eval_model(data)
             loss = criterion(output, targets)
-            # Use .mean() to ensure we get a scalar tensor before using .item()
-            total_loss += loss.mean().item() * len(data[0])
-    return total_loss / len(data_source)
-
+            total_loss += loss.detach().mean().item()
+            num_batches += 1
+    return total_loss / num_batches if num_batches > 0 else total_loss
+ 
 def forecast_seq(model, sequences):
     start_timer = time.time()
     model.eval()
