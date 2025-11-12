@@ -1,3 +1,22 @@
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+# Create a random order for parts
+random_parts = (
+    df.select("part_id")
+      .distinct()
+      .withColumn("rand", F.rand())
+      .withColumn("rank", F.row_number().over(Window.orderBy("rand")))
+      .filter(F.col("rank") <= 100)
+)
+
+# Collect the selected 100 part IDs
+part_ids = [row["part_id"] for row in random_parts.collect()]
+
+# Filter your main DataFrame
+df_random_100_parts = df.filter(df.part_id.isin(part_ids))
+
+
 from pyspark.sql.types import IntegerType, DoubleType, FloatType, LongType
 
 numeric_cols = [f.name for f in df.schema.fields
