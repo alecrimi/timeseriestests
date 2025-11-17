@@ -14,31 +14,42 @@ from tensorflow.keras.optimizers import Adam
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, accuracy_score
 
-# Your existing code for random part selection
-random_parts = (
-    df.select("part_id")
-      .distinct()
-      .withColumn("rand", F.rand())
-      .withColumn("rank", F.row_number().over(Window.orderBy("rand")))
-      .filter(F.col("rank") <= 100)
-)
+# Select specific product designation instead of random parts
+# Replace 'your_specific_product' with the actual product designation you want to analyze
+specific_product = "your_specific_product"  # Change this to your actual product designation
 
-part_ids = [row["part_id"] for row in random_parts.collect()]
-df_random_100_parts = df.filter(df.part_id.isin(part_ids))
+df_specific_product = df.filter(df["Product designation"] == specific_product)
+
+# If you want to analyze multiple specific products, you can use:
+# specific_products = ["product1", "product2", "product3"]
+# df_specific_product = df.filter(df["Product designation"].isin(specific_products))
+
+print(f"Number of records for product '{specific_product}': {df_specific_product.count()}")
 
 # Identify numeric columns and target variable
-target_column = "your_target_column"  # Change this to your actual target column
+target_column = "Failed_quantity"  # Using Failed_quantity as target
 
 numeric_cols = [f.name for f in df.schema.fields
                 if isinstance(f.dataType, (IntegerType, DoubleType, FloatType, LongType))
-                and f.name != target_column and f.name != "part_id"]
+                and f.name != target_column 
+                and f.name != "Product designation"
+                and f.name != "part_id"  # Remove part_id if it exists
+                and not f.name.startswith("id")]  # Typically exclude ID columns
+
+print(f"Numeric features selected: {numeric_cols}")
 
 # Convert to pandas for time series processing
-pandas_df = df_random_100_parts.select(numeric_cols + [target_column, "part_id"]).toPandas()
+pandas_df = df_specific_product.select(numeric_cols + [target_column, "Product designation"]).toPandas()
 
-# Sort by part_id and ensure temporal order if you have a timestamp column
-# If you have a timestamp, add it to the select statement above and sort by it
-# pandas_df = pandas_df.sort_values(['part_id', 'timestamp'])
+# Check if we have enough data
+if len(pandas_df) == 0:
+    raise ValueError(f"No data found for product designation: {specific_product}")
+    
+print(f"Data shape for {specific_product}: {pandas_df.shape}")
+
+# Sort by time if you have a timestamp column
+# If you have a timestamp column, add it to the select statement and sort by it
+# pandas_df = pandas_df.sort_values('timestamp_column')
 
 def create_sequences(data, features, target, sequence_length=10):
     """Create sequences for LSTM training"""
@@ -74,55 +85,79 @@ def build_lstm_model(input_shape, output_dim=1, problem_type='regression'):
 # Prepare data for LSTM
 sequence_length = 10  # Adjust based on your time series characteristics
 
-# Group by part_id and create sequences
-all_sequences_X = []
-all_sequences_y = []
+# Check target variable characteristics
+target_stats = pandas_df[target_column].describe()
+print(f"\nTarget variable '{target_column}' statistics:")
+print(target_stats)
 
-for part_id in pandas_df['part_id'].unique():
-    part_data = pandas_df[pandas_df['part_id'] == part_id].reset_index(drop=True)
-    
-    if len(part_data) > sequence_length:
-        # Scale features
-        scaler = StandardScaler()
-        scaled_features = scaler.fit_transform(part_data[numeric_cols])
-        scaled_df = pd.DataFrame(scaled_features, columns=numeric_cols)
-        scaled_df[target_column] = part_data[target_column].values
-        
-        X_seq, y_seq = create_sequences(scaled_df, numeric_cols, target_column, sequence_length)
-        all_sequences_X.append(X_seq)
-        all_sequences_y.append(y_seq)
+# Determine problem type based on target variable
+unique_targets = pandas_df[target_column].nunique()
+problem_type = 'classification' if unique_targets <= 10 else 'regression'
+print(f"Problem type: {problem_type} (unique values: {unique_targets})")
 
-# Combine all sequences
-if all_sequences_X:
-    X_combined = np.vstack(all_sequences_X)
-    y_combined = np.concatenate(all_sequences_y)
+# Scale features and prepare sequences
+scaler = StandardScaler()
+scaled_features = scaler.fit_transform(pandas_df[numeric_cols])
+scaled_df = pd.DataFrame(scaled_features, columns=numeric_cols)
+scaled_df[target_column] = pandas_df[target_column].values
+
+# Create sequences
+if len(scaled_df) > sequence_length:
+    X_sequences, y_sequences = create_sequences(scaled_df, numeric_cols, target_column, sequence_length)
     
-    # Determine problem type
-    unique_targets = np.unique(y_combined)
-    problem_type = 'classification' if len(unique_targets) <= 10 else 'regression'
+    print(f"Sequences created: {X_sequences.shape}")
+    print(f"Target shape: {y_sequences.shape}")
+    
+    # Build and train LSTM model
+    input_shape = (X_sequences.shape[1], X_sequences.shape[2])
     
     if problem_type == 'classification':
-        # For classification, convert to integer labels if needed
-        if not np.issubdtype(y_combined.dtype, np.integer):
+        # For classification, ensure labels are integers
+        if not np.issubdtype(y_sequences.dtype, np.integer):
             from sklearn.preprocessing import LabelEncoder
             le = LabelEncoder()
-            y_combined = le.fit_transform(y_combined)
-        output_dim = len(np.unique(y_combined))
+            y_sequences = le.fit_transform(y_sequences)
+        output_dim = len(np.unique(y_sequences))
     else:
         output_dim = 1
     
-    # Build and train LSTM model
-    input_shape = (X_combined.shape[1], X_combined.shape[2])
     lstm_model = build_lstm_model(input_shape, output_dim, problem_type)
     
     # Train the model
+    print("Training LSTM model...")
     history = lstm_model.fit(
-        X_combined, y_combined,
+        X_sequences, y_sequences,
         epochs=50,
         batch_size=32,
         validation_split=0.2,
         verbose=1
     )
+    
+    # Plot training history
+    plt.figure(figsize=(12, 4))
+    plt.subplot(1, 2, 1)
+    plt.plot(history.history['loss'], label='Training Loss')
+    plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.title('Model Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    
+    plt.subplot(1, 2, 2)
+    if problem_type == 'regression':
+        plt.plot(history.history['mae'], label='Training MAE')
+        plt.plot(history.history['val_mae'], label='Validation MAE')
+        plt.title('Model MAE')
+        plt.ylabel('MAE')
+    else:
+        plt.plot(history.history['accuracy'], label='Training Accuracy')
+        plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+        plt.title('Model Accuracy')
+        plt.ylabel('Accuracy')
+    plt.xlabel('Epoch')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
     
     # Create a wrapper model for SHAP compatibility
     class LSTMWrapper:
@@ -141,14 +176,15 @@ if all_sequences_X:
     wrapped_model = LSTMWrapper(lstm_model, sequence_length, numeric_cols)
     
     # Prepare background data for SHAP (use a subset for efficiency)
-    background_data = X_combined[:100].reshape(100, -1)
+    background_data = X_sequences[:50].reshape(50, -1)
     
     # Create SHAP explainer
     explainer = shap.KernelExplainer(wrapped_model.predict, background_data)
     
     # Calculate SHAP values for a subset of data
-    sample_indices = np.random.choice(len(X_combined), min(100, len(X_combined)), replace=False)
-    X_sample = X_combined[sample_indices].reshape(len(sample_indices), -1)
+    sample_size = min(50, len(X_sequences))
+    sample_indices = np.random.choice(len(X_sequences), sample_size, replace=False)
+    X_sample = X_sequences[sample_indices].reshape(sample_size, -1)
     
     shap_values = explainer.shap_values(X_sample)
     
@@ -165,13 +201,15 @@ if all_sequences_X:
     if len(shap_values.shape) > 2:
         # For multi-class classification, explain the first class
         shap_values_2d = shap_values[0]
+        expected_value = explainer.expected_value[0]
     else:
         shap_values_2d = shap_values
+        expected_value = explainer.expected_value
     
     # 1. SHAP Summary Plot
     plt.figure(figsize=(15, 10))
     shap.summary_plot(shap_values_2d, X_sample, feature_names=sequence_feature_names, show=False)
-    plt.title("SHAP Summary Plot - LSTM Feature Impact on Model Output")
+    plt.title(f"SHAP Summary Plot - {specific_product}\nFailed_quantity Prediction")
     plt.tight_layout()
     plt.show()
     
@@ -179,7 +217,7 @@ if all_sequences_X:
     plt.figure(figsize=(12, 8))
     shap.summary_plot(shap_values_2d, X_sample, feature_names=sequence_feature_names, 
                      plot_type="bar", show=False)
-    plt.title("SHAP Feature Importance - LSTM")
+    plt.title(f"SHAP Feature Importance - {specific_product}")
     plt.tight_layout()
     plt.show()
     
@@ -201,7 +239,7 @@ if all_sequences_X:
     
     plt.bar(range(len(features)), importance)
     plt.xticks(range(len(features)), features, rotation=45)
-    plt.title("Aggregated SHAP Feature Importance (Across Time Steps)")
+    plt.title(f"Aggregated SHAP Feature Importance\n{specific_product}")
     plt.xlabel("Features")
     plt.ylabel("Mean |SHAP value|")
     plt.tight_layout()
@@ -216,12 +254,12 @@ if all_sequences_X:
         plt.figure(figsize=(12, 8))
         shap.dependence_plot(feature_name, shap_values_2d, X_sample, 
                            feature_names=sequence_feature_names, show=False)
-        plt.title(f"SHAP Dependence Plot for {feature_name}")
+        plt.title(f"SHAP Dependence Plot for {feature_name}\n{specific_product}")
         plt.tight_layout()
         plt.show()
     
     # 5. Summary statistics of SHAP values
-    print("\nSHAP Values Summary Statistics (LSTM):")
+    print(f"\nSHAP Values Summary Statistics for {specific_product}:")
     shap_summary = pd.DataFrame({
         'Sequence_Feature': sequence_feature_names,
         'Mean_SHAP': np.mean(shap_values_2d, axis=0),
@@ -241,20 +279,29 @@ if all_sequences_X:
     top_original_features = sorted(feature_importance_final.items(), key=lambda x: x[1], reverse=True)[:5]
     
     plt.figure(figsize=(12, 8))
-    for feature, _ in top_original_features:
+    for feature, importance in top_original_features:
         if feature in temporal_importance:
             plt.plot(range(sequence_length), temporal_importance[feature][::-1], 
-                    marker='o', label=feature, linewidth=2)
+                    marker='o', label=f"{feature} (imp: {importance:.4f})", linewidth=2)
     
     plt.xlabel("Time Steps (t-0 = most recent)")
     plt.ylabel("Mean |SHAP value|")
-    plt.title("Temporal Feature Importance - How Far Back Features Matter")
+    plt.title(f"Temporal Feature Importance\n{specific_product} - Failed_quantity Prediction")
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.show()
     
-    print("\nLSTM-SHAP analysis completed successfully!")
+    # 7. Save results
+    results_df = pd.DataFrame({
+        'Product_Designation': [specific_product] * len(features_sorted),
+        'Feature': [f[0] for f in features_sorted],
+        'SHAP_Importance': [f[1] for f in features_sorted]
+    })
+    
+    results_df.to_csv(f'shap_analysis_{specific_product.replace(" ", "_")}.csv', index=False)
+    print(f"\nResults saved to 'shap_analysis_{specific_product.replace(' ', '_')}.csv'")
+    print(f"\nLSTM-SHAP analysis for '{specific_product}' completed successfully!")
 
 else:
-    print("Not enough data to create sequences. Try reducing sequence_length or selecting more parts.")
+    print(f"Not enough data for product '{specific_product}'. Need more than {sequence_length} records. Current records: {len(scaled_df)}")
