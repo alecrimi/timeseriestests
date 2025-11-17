@@ -17,24 +17,24 @@ from sklearn.metrics import mean_squared_error, accuracy_score
 # Select specific product designation instead of random parts
 specific_product = "your_specific_product"  # Change this to your actual product designation
 
-df_specific_product = df.filter(df["Product designation"] == specific_product)
+df_specific_product = df.filter(df["ProductDesignation"] == specific_product)
 
 print(f"Number of records for product '{specific_product}': {df_specific_product.count()}")
 
 # Identify numeric columns and target variable
-target_column = "Failed_quantity"
+target_column = "AVAFailure"
 
 numeric_cols = [f.name for f in df.schema.fields
                 if isinstance(f.dataType, (IntegerType, DoubleType, FloatType, LongType))
                 and f.name != target_column 
-                and f.name != "Product designation"
+                and f.name != "ProductDesignation"
                 and f.name != "part_id"
                 and not f.name.startswith("id")]
 
 print(f"Numeric features selected: {numeric_cols}")
 
 # Convert to pandas for time series processing
-pandas_df = df_specific_product.select(numeric_cols + [target_column, "Product designation"]).toPandas()
+pandas_df = df_specific_product.select(numeric_cols + [target_column, "ProductDesignation"]).toPandas()
 
 if len(pandas_df) == 0:
     raise ValueError(f"No data found for product designation: {specific_product}")
@@ -115,7 +115,7 @@ if len(scaled_df) > sequence_length:
     print("Training LSTM model...")
     history = lstm_model.fit(
         X_sequences, y_sequences,
-        epochs=30,  # Reduced for faster execution
+        epochs=30,
         batch_size=16,
         validation_split=0.2,
         verbose=1
@@ -130,9 +130,7 @@ if len(scaled_df) > sequence_length:
             self.n_features = len(numeric_cols)
         
         def predict(self, X):
-            # X shape should be (n_samples, sequence_length * n_features)
             if len(X.shape) == 2:
-                # Reshape to (n_samples, sequence_length, n_features)
                 X_reshaped = X.reshape(-1, self.sequence_length, self.n_features)
                 return self.model.predict(X_reshaped, verbose=0)
             return self.model.predict(X, verbose=0)
@@ -155,8 +153,6 @@ if len(scaled_df) > sequence_length:
     # Create SHAP explainer
     try:
         explainer = shap.KernelExplainer(wrapped_model.predict, background_data)
-        
-        # Calculate SHAP values
         shap_values = explainer.shap_values(X_sample_flattened)
         
         print(f"SHAP values type: {type(shap_values)}")
@@ -171,9 +167,7 @@ if len(scaled_df) > sequence_length:
         print(f"Error with KernelExplainer: {e}")
         print("Trying alternative approach with GradientExplainer...")
         
-        # Alternative approach using GradientExplainer
         import tensorflow as tf
-        
         def model_output(X):
             return lstm_model(X)
         
@@ -181,11 +175,10 @@ if len(scaled_df) > sequence_length:
         shap_values = explainer.shap_values(X_sample_flattened.reshape(n_samples, sequence_length, len(numeric_cols)))
         
         if isinstance(shap_values, list):
-            shap_values = shap_values[0]  # Take first output
+            shap_values = shap_values[0]
     
     # Handle different SHAP values formats
     if isinstance(shap_values, list):
-        # For classification, use the first class
         shap_values_2d = shap_values[0] if len(shap_values) > 0 else shap_values
     else:
         shap_values_2d = shap_values
@@ -211,20 +204,23 @@ if len(scaled_df) > sequence_length:
         shap.summary_plot(shap_values_2d, X_sample_flattened, 
                          feature_names=sequence_feature_names, 
                          show=False)
-        plt.title(f"SHAP Summary Plot - {specific_product}\nFailed_quantity Prediction")
+        plt.title(f"SHAP Summary Plot - {specific_product}\nAVAFailure Prediction")
         plt.tight_layout()
         plt.show()
     except Exception as e:
         print(f"Error in summary plot: {e}")
-        print("Trying alternative summary plot approach...")
+        print("Creating alternative summary plot...")
         
         # Alternative: Plot mean absolute SHAP values
         mean_shap = np.mean(np.abs(shap_values_2d), axis=0)
         top_indices = np.argsort(mean_shap)[-20:]  # Top 20 features
         
+        # FIX: Ensure we don't exceed the feature names length
+        valid_indices = [i for i in top_indices if i < len(sequence_feature_names)]
+        
         plt.figure(figsize=(12, 8))
-        plt.barh(range(len(top_indices)), mean_shap[top_indices])
-        plt.yticks(range(len(top_indices)), [sequence_feature_names[i] for i in top_indices])
+        plt.barh(range(len(valid_indices)), mean_shap[valid_indices])
+        plt.yticks(range(len(valid_indices)), [sequence_feature_names[i] for i in valid_indices])
         plt.title(f"Top SHAP Features - {specific_product}")
         plt.xlabel("Mean |SHAP value|")
         plt.tight_layout()
@@ -267,16 +263,14 @@ if len(scaled_df) > sequence_length:
     plt.tight_layout()
     plt.show()
     
-    # 4. SHAP Dependence Plot for top features (simplified)
+    # 4. SHAP Dependence Plot for top features
     mean_abs_shap = np.abs(shap_values_2d).mean(axis=0)
-    top_features_idx = np.argsort(mean_abs_shap)[-2:]  # Top 2 features only
+    top_features_idx = np.argsort(mean_abs_shap)[-2:]
     
     for i, feature_idx in enumerate(top_features_idx):
         feature_name = sequence_feature_names[feature_idx]
         try:
             plt.figure(figsize=(10, 6))
-            
-            # Create simple dependence plot manually
             feature_values = X_sample_flattened[:, feature_idx]
             shap_values_feature = shap_values_2d[:, feature_idx]
             
@@ -324,7 +318,16 @@ if len(scaled_df) > sequence_length:
     plt.tight_layout()
     plt.show()
     
-    print(f"\nAnalysis completed for {specific_product}!")
+    # 7. Save results
+    results_df = pd.DataFrame({
+        'ProductDesignation': [specific_product] * len(features_sorted),
+        'Feature': [f[0] for f in features_sorted],
+        'SHAP_Importance': [f[1] for f in features_sorted]
+    })
+    
+    results_df.to_csv(f'shap_analysis_{specific_product.replace(" ", "_")}.csv', index=False)
+    print(f"\nResults saved to 'shap_analysis_{specific_product.replace(' ', '_')}.csv'")
+    print(f"\nLSTM-SHAP analysis for '{specific_product}' completed successfully!")
 
 else:
     print(f"Not enough data for {specific_product}. Need more than {sequence_length} records.")
