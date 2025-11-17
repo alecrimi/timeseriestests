@@ -4,330 +4,162 @@ import shap
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.regression import RandomForestRegressor
+from pyspark.ml.classification import RandomForestClassifier
 from pyspark.sql.types import IntegerType, DoubleType, FloatType, LongType
 
-# TensorFlow/Keras for LSTM
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.optimizers import Adam
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import mean_squared_error, accuracy_score
+# Set all random seeds for reproducibility
+RANDOM_SEED = 42
+np.random.seed(RANDOM_SEED)
 
-# Select specific product designation instead of random parts
-specific_product = "your_specific_product"  # Change this to your actual product designation
+# Your existing code for random part selection WITH fixed seed
+random_parts = (
+    df.select("part_id")
+      .distinct()
+      .withColumn("rand", F.rand(seed=RANDOM_SEED))  # Fixed seed for Spark random
+      .withColumn("rank", F.row_number().over(Window.orderBy("rand")))
+      .filter(F.col("rank") <= 100)
+)
 
-df_specific_product = df.filter(df["ProductDesignation"] == specific_product)
-
-print(f"Number of records for product '{specific_product}': {df_specific_product.count()}")
+part_ids = [row["part_id"] for row in random_parts.collect()]
+df_random_100_parts = df.filter(df.part_id.isin(part_ids))
 
 # Identify numeric columns and target variable
-target_column = "AVAFailure"
+target_column = "your_target_column"  # Change this to your actual target column
 
 numeric_cols = [f.name for f in df.schema.fields
                 if isinstance(f.dataType, (IntegerType, DoubleType, FloatType, LongType))
-                and f.name != target_column 
-                and f.name != "ProductDesignation"
-                and f.name != "part_id"
-                and not f.name.startswith("id")]
+                and f.name != target_column and f.name != "part_id"]
 
-print(f"Numeric features selected: {numeric_cols}")
+# Convert to pandas for SHAP analysis
+pandas_df = df_random_100_parts.select(numeric_cols + [target_column, "part_id"]).toPandas()
 
-# Convert to pandas for time series processing
-pandas_df = df_specific_product.select(numeric_cols + [target_column, "ProductDesignation"]).toPandas()
+# Separate features and target
+X = pandas_df[numeric_cols]
+y = pandas_df[target_column]
 
-if len(pandas_df) == 0:
-    raise ValueError(f"No data found for product designation: {specific_product}")
-    
-print(f"Data shape for {specific_product}: {pandas_df.shape}")
+# Train a model for SHAP analysis with fixed seeds
+# For regression:
+# model = RandomForestRegressor(
+#     n_estimators=100, 
+#     random_state=RANDOM_SEED,
+#     max_depth=10,  # Added for more stability
+#     min_samples_split=10,  # Added for more stability
+#     bootstrap=True
+# )
 
-def create_sequences(data, features, target, sequence_length=10):
-    """Create sequences for LSTM training"""
-    X, y = [], []
-    for i in range(len(data) - sequence_length):
-        X.append(data[features].iloc[i:(i + sequence_length)].values)
-        y.append(data[target].iloc[i + sequence_length])
-    return np.array(X), np.array(y)
+# For classification:
+model = RandomForestClassifier(
+    n_estimators=100, 
+    random_state=RANDOM_SEED,
+    max_depth=10,  # Added for more stability
+    min_samples_split=10,  # Added for more stability
+    bootstrap=True
+)
 
-def build_lstm_model(input_shape, output_dim=1, problem_type='regression'):
-    """Build LSTM model for time series analysis"""
-    model = Sequential([
-        LSTM(50, return_sequences=True, input_shape=input_shape),
-        Dropout(0.2),
-        LSTM(50, return_sequences=False),
-        Dropout(0.2),
-        Dense(32, activation='relu'),
-        Dropout(0.2),
-        Dense(output_dim, activation='linear' if problem_type == 'regression' else 'softmax')
-    ])
-    
-    if problem_type == 'regression':
-        model.compile(optimizer=Adam(learning_rate=0.001), 
-                     loss='mse', metrics=['mae'])
-    else:
-        model.compile(optimizer=Adam(learning_rate=0.001), 
-                     loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-    
-    return model
+model.fit(X, y)
 
-# Prepare data for LSTM
-sequence_length = 10
+# Calculate SHAP values with fixed random state for TreeExplainer
+# Note: TreeExplainer doesn't have a random_state parameter, but we can set numpy seed
+np.random.seed(RANDOM_SEED)
+explainer = shap.TreeExplainer(
+    model, 
+    feature_perturbation="interventional"  # More stable than "tree_path_dependent"
+)
 
-# Check target variable characteristics
-target_stats = pandas_df[target_column].describe()
-print(f"\nTarget variable '{target_column}' statistics:")
-print(target_stats)
+# Calculate SHAP values
+shap_values = explainer.shap_values(X)
 
-# Determine problem type based on target variable
-unique_targets = pandas_df[target_column].nunique()
-problem_type = 'classification' if unique_targets <= 10 else 'regression'
-print(f"Problem type: {problem_type} (unique values: {unique_targets})")
-
-# Scale features and prepare sequences
-scaler = StandardScaler()
-scaled_features = scaler.fit_transform(pandas_df[numeric_cols])
-scaled_df = pd.DataFrame(scaled_features, columns=numeric_cols)
-scaled_df[target_column] = pandas_df[target_column].values
-
-# Create sequences
-if len(scaled_df) > sequence_length:
-    X_sequences, y_sequences = create_sequences(scaled_df, numeric_cols, target_column, sequence_length)
-    
-    print(f"Sequences created - X shape: {X_sequences.shape}, y shape: {y_sequences.shape}")
-    
-    # Build and train LSTM model
-    input_shape = (X_sequences.shape[1], X_sequences.shape[2])
-    
-    if problem_type == 'classification':
-        if not np.issubdtype(y_sequences.dtype, np.integer):
-            from sklearn.preprocessing import LabelEncoder
-            le = LabelEncoder()
-            y_sequences = le.fit_transform(y_sequences)
-        output_dim = len(np.unique(y_sequences))
-        print(f"Classification problem with {output_dim} classes")
-    else:
-        output_dim = 1
-        print("Regression problem")
-    
-    lstm_model = build_lstm_model(input_shape, output_dim, problem_type)
-    
-    # Train the model
-    print("Training LSTM model...")
-    history = lstm_model.fit(
-        X_sequences, y_sequences,
-        epochs=30,
-        batch_size=16,
-        validation_split=0.2,
-        verbose=1
-    )
-    
-    # Create a wrapper model for SHAP compatibility
-    class LSTMWrapper:
-        def __init__(self, model, sequence_length, numeric_cols):
-            self.model = model
-            self.sequence_length = sequence_length
-            self.numeric_cols = numeric_cols
-            self.n_features = len(numeric_cols)
-        
-        def predict(self, X):
-            if len(X.shape) == 2:
-                X_reshaped = X.reshape(-1, self.sequence_length, self.n_features)
-                return self.model.predict(X_reshaped, verbose=0)
-            return self.model.predict(X, verbose=0)
-    
-    # Create wrapper instance
-    wrapped_model = LSTMWrapper(lstm_model, sequence_length, numeric_cols)
-    
-    # Prepare data for SHAP - use flattened sequences
-    n_samples = min(50, len(X_sequences))
-    X_sample_flattened = X_sequences[:n_samples].reshape(n_samples, -1)
-    
-    print(f"SHAP input shape: {X_sample_flattened.shape}")
-    
-    # Use a smaller background dataset
-    background_size = min(20, len(X_sequences))
-    background_data = X_sequences[:background_size].reshape(background_size, -1)
-    
-    print(f"Background data shape: {background_data.shape}")
-    
-    # Create SHAP explainer
-    try:
-        explainer = shap.KernelExplainer(wrapped_model.predict, background_data)
-        shap_values = explainer.shap_values(X_sample_flattened)
-        
-        print(f"SHAP values type: {type(shap_values)}")
-        if isinstance(shap_values, list):
-            print(f"SHAP values list length: {len(shap_values)}")
-            for i, sv in enumerate(shap_values):
-                print(f"SHAP values[{i}] shape: {sv.shape}")
-        else:
-            print(f"SHAP values shape: {shap_values.shape}")
-        
-    except Exception as e:
-        print(f"Error with KernelExplainer: {e}")
-        print("Trying alternative approach with GradientExplainer...")
-        
-        import tensorflow as tf
-        def model_output(X):
-            return lstm_model(X)
-        
-        explainer = shap.GradientExplainer(model_output, X_sequences[:background_size])
-        shap_values = explainer.shap_values(X_sample_flattened.reshape(n_samples, sequence_length, len(numeric_cols)))
-        
-        if isinstance(shap_values, list):
-            shap_values = shap_values[0]
-    
-    # Handle different SHAP values formats
-    if isinstance(shap_values, list):
-        shap_values_2d = shap_values[0] if len(shap_values) > 0 else shap_values
-    else:
-        shap_values_2d = shap_values
-    
-    # Ensure shap_values_2d is 2D
-    if len(shap_values_2d.shape) == 3:
-        shap_values_2d = shap_values_2d.reshape(shap_values_2d.shape[0], -1)
-    
-    print(f"Final SHAP values shape: {shap_values_2d.shape}")
-    print(f"X_sample_flattened shape: {X_sample_flattened.shape}")
-    
-    # Reshape feature names for sequences
-    sequence_feature_names = []
-    for i in range(sequence_length):
-        for col in numeric_cols:
-            sequence_feature_names.append(f"{col}_t-{sequence_length-i-1}")
-    
-    print(f"Number of feature names: {len(sequence_feature_names)}")
-    
-    # 1. SHAP Summary Plot - with proper shape checking
-    try:
-        plt.figure(figsize=(15, 10))
-        shap.summary_plot(shap_values_2d, X_sample_flattened, 
-                         feature_names=sequence_feature_names, 
-                         show=False)
-        plt.title(f"SHAP Summary Plot - {specific_product}\nAVAFailure Prediction")
-        plt.tight_layout()
-        plt.show()
-    except Exception as e:
-        print(f"Error in summary plot: {e}")
-        print("Creating alternative summary plot...")
-        
-        # Alternative: Plot mean absolute SHAP values
-        mean_shap = np.mean(np.abs(shap_values_2d), axis=0)
-        top_indices = np.argsort(mean_shap)[-20:]  # Top 20 features
-        
-        # FIX: Ensure we don't exceed the feature names length
-        valid_indices = [i for i in top_indices if i < len(sequence_feature_names)]
-        
-        plt.figure(figsize=(12, 8))
-        plt.barh(range(len(valid_indices)), mean_shap[valid_indices])
-        plt.yticks(range(len(valid_indices)), [sequence_feature_names[i] for i in valid_indices])
-        plt.title(f"Top SHAP Features - {specific_product}")
-        plt.xlabel("Mean |SHAP value|")
-        plt.tight_layout()
-        plt.show()
-    
-    # 2. SHAP Feature Importance (Bar Plot)
-    try:
-        plt.figure(figsize=(12, 8))
-        shap.summary_plot(shap_values_2d, X_sample_flattened, 
-                         feature_names=sequence_feature_names, 
-                         plot_type="bar", 
-                         show=False)
-        plt.title(f"SHAP Feature Importance - {specific_product}")
-        plt.tight_layout()
-        plt.show()
-    except Exception as e:
-        print(f"Error in bar plot: {e}")
-    
-    # 3. Aggregate SHAP values by original feature (across time steps)
-    feature_importance_agg = {}
-    for i, feature_name in enumerate(sequence_feature_names):
-        original_feature = feature_name.split('_t-')[0]
-        if original_feature not in feature_importance_agg:
-            feature_importance_agg[original_feature] = []
-        feature_importance_agg[original_feature].append(np.mean(np.abs(shap_values_2d[:, i])))
-    
-    # Calculate mean importance for each original feature
-    feature_importance_final = {k: np.mean(v) for k, v in feature_importance_agg.items()}
-    
-    # Plot aggregated feature importance
-    plt.figure(figsize=(10, 6))
-    features_sorted = sorted(feature_importance_final.items(), key=lambda x: x[1], reverse=True)
-    features, importance = zip(*features_sorted)
-    
-    plt.bar(range(len(features)), importance)
-    plt.xticks(range(len(features)), features, rotation=45)
-    plt.title(f"Aggregated SHAP Feature Importance\n{specific_product}")
-    plt.xlabel("Features")
-    plt.ylabel("Mean |SHAP value|")
-    plt.tight_layout()
-    plt.show()
-    
-    # 4. SHAP Dependence Plot for top features
-    mean_abs_shap = np.abs(shap_values_2d).mean(axis=0)
-    top_features_idx = np.argsort(mean_abs_shap)[-2:]
-    
-    for i, feature_idx in enumerate(top_features_idx):
-        feature_name = sequence_feature_names[feature_idx]
-        try:
-            plt.figure(figsize=(10, 6))
-            feature_values = X_sample_flattened[:, feature_idx]
-            shap_values_feature = shap_values_2d[:, feature_idx]
-            
-            plt.scatter(feature_values, shap_values_feature, alpha=0.6)
-            plt.xlabel(feature_name)
-            plt.ylabel("SHAP Value")
-            plt.title(f"SHAP Dependence: {feature_name}\n{specific_product}")
-            plt.grid(True, alpha=0.3)
-            plt.tight_layout()
-            plt.show()
-            
-        except Exception as e:
-            print(f"Error in dependence plot for {feature_name}: {e}")
-    
-    # 5. Summary statistics
-    print(f"\nTop 10 Most Important Features for {specific_product}:")
-    shap_summary = pd.DataFrame({
-        'Feature': sequence_feature_names,
-        'Mean_Abs_SHAP': np.mean(np.abs(shap_values_2d), axis=0)
-    })
-    top_features = shap_summary.sort_values('Mean_Abs_SHAP', ascending=False).head(10)
-    print(top_features)
-    
-    # 6. Temporal importance analysis
-    temporal_importance = {}
-    for feature in numeric_cols:
-        feature_indices = [i for i, name in enumerate(sequence_feature_names) if name.startswith(feature)]
-        if feature_indices:
-            temporal_importance[feature] = np.mean(np.abs(shap_values_2d[:, feature_indices]), axis=0)
-    
-    # Plot temporal importance
-    top_original_features = sorted(feature_importance_final.items(), key=lambda x: x[1], reverse=True)[:5]
-    
-    plt.figure(figsize=(12, 6))
-    for feature, importance in top_original_features:
-        if feature in temporal_importance:
-            plt.plot(range(sequence_length), temporal_importance[feature][::-1], 
-                    marker='o', label=f"{feature}", linewidth=2)
-    
-    plt.xlabel("Time Steps (t-0 = most recent)")
-    plt.ylabel("Mean |SHAP value|")
-    plt.title(f"Temporal Feature Importance\n{specific_product}")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.show()
-    
-    # 7. Save results
-    results_df = pd.DataFrame({
-        'ProductDesignation': [specific_product] * len(features_sorted),
-        'Feature': [f[0] for f in features_sorted],
-        'SHAP_Importance': [f[1] for f in features_sorted]
-    })
-    
-    results_df.to_csv(f'shap_analysis_{specific_product.replace(" ", "_")}.csv', index=False)
-    print(f"\nResults saved to 'shap_analysis_{specific_product.replace(' ', '_')}.csv'")
-    print(f"\nLSTM-SHAP analysis for '{specific_product}' completed successfully!")
-
+# For classification, specify which class if needed
+# If it's binary classification, shap_values will have shape [n_samples, n_features]
+# If it's multi-class, shap_values will be a list of arrays for each class
+if isinstance(shap_values, list):
+    # For multi-class, use the first class or choose based on your needs
+    shap_values_to_use = shap_values[0]
+    expected_value = explainer.expected_value[0]
 else:
-    print(f"Not enough data for {specific_product}. Need more than {sequence_length} records.")
+    shap_values_to_use = shap_values
+    expected_value = explainer.expected_value
+
+# 1. SHAP Summary Plot
+plt.figure(figsize=(12, 8))
+shap.summary_plot(shap_values_to_use, X, feature_names=numeric_cols, show=False)
+plt.title("SHAP Summary Plot - Feature Impact on Model Output")
+plt.tight_layout()
+plt.show()
+
+# 2. SHAP Feature Importance (Bar Plot)
+plt.figure(figsize=(10, 6))
+shap.summary_plot(shap_values_to_use, X, feature_names=numeric_cols, plot_type="bar", show=False)
+plt.title("SHAP Feature Importance")
+plt.tight_layout()
+plt.show()
+
+# 3. SHAP Values DataFrame
+shap_df = pd.DataFrame(shap_values_to_use, columns=[f"SHAP_{col}" for col in numeric_cols])
+pandas_df_with_shap = pd.concat([pandas_df.reset_index(drop=True), shap_df], axis=1)
+
+# Display first few rows with SHAP values
+print("Data with SHAP values (first 10 rows):")
+print(pandas_df_with_shap[['part_id', target_column] + list(shap_df.columns[:3])].head(10))
+
+# 4. SHAP Force Plot for first observation
+plt.figure(figsize=(12, 4))
+shap.force_plot(expected_value, 
+                shap_values_to_use[0], 
+                X.iloc[0], 
+                feature_names=numeric_cols, 
+                matplotlib=True, 
+                show=False)
+plt.title("SHAP Force Plot - First Observation")
+plt.tight_layout()
+plt.show()
+
+# 5. SHAP Dependence Plot for top features (most stable ones)
+# Get mean absolute SHAP values to find most important features
+mean_abs_shap = np.abs(shap_values_to_use).mean(axis=0)
+top_features_idx = np.argsort(mean_abs_shap)[-3:]  # Top 3 features
+top_feature_names = [numeric_cols[i] for i in top_features_idx]
+
+print(f"\nTop 3 most important features by mean |SHAP|:")
+for i, feature_name in enumerate(top_feature_names):
+    print(f"{i+1}. {feature_name}: {mean_abs_shap[top_features_idx[i]]:.4f}")
+
+for feature_name in top_feature_names:
+    plt.figure(figsize=(10, 6))
+    shap.dependence_plot(feature_name, shap_values_to_use, X, feature_names=numeric_cols, show=False)
+    plt.title(f"SHAP Dependence Plot for {feature_name}")
+    plt.tight_layout()
+    plt.show()
+
+# 6. Summary statistics of SHAP values
+print("\nSHAP Values Summary Statistics (sorted by importance):")
+shap_summary = pd.DataFrame({
+    'Feature': numeric_cols,
+    'Mean_SHAP': np.mean(shap_values_to_use, axis=0),
+    'Std_SHAP': np.std(shap_values_to_use, axis=0),
+    'Mean_Abs_SHAP': np.mean(np.abs(shap_values_to_use), axis=0)
+})
+shap_summary = shap_summary.sort_values('Mean_Abs_SHAP', ascending=False)
+print(shap_summary.head(10))  # Show only top 10
+
+# 7. Save the part_ids used for this analysis to ensure reproducibility
+print(f"\nPart IDs used in this analysis (first 10): {part_ids[:10]}")
+print(f"Total parts analyzed: {len(part_ids)}")
+
+# 8. Save SHAP values to CSV with timestamp for tracking
+from datetime import datetime
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+filename = f'shap_values_analysis_seed{RANDOM_SEED}_{timestamp}.csv'
+pandas_df_with_shap.to_csv(filename, index=False)
+print(f"\nSHAP values saved to '{filename}'")
+
+# 9. Additional stability: Verify model performance is consistent
+from sklearn.metrics import accuracy_score, classification_report
+y_pred = model.predict(X)
+if hasattr(model, 'predict_proba'):
+    y_proba = model.predict_proba(X)
+    print(f"\nModel accuracy: {accuracy_score(y, y_pred):.4f}")
+    print("\nClassification Report:")
+    print(classification_report(y, y_pred))
